@@ -1,0 +1,10 @@
+pyrofork
+tgcrypto
+pyromod==1.5
+pypdf==3.16.0
+reportlab==3.6.13
+flask==2.2.5
+pymongo>=4.0
+python-dotenv>=1.0.0
+pytz
+Pillow>=10.0.0
