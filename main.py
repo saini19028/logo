@@ -1,4 +1,4 @@
-# main.py — Complete working bot with all features (including PDF logo watermark)
+# main.py — Complete working bot with all features (in‑place editing + fixed logo transparency)
 import os
 import io
 import shutil
@@ -218,7 +218,7 @@ def pdf_watermark(
         except:
             return False
 
-# ---------- PDF Logo Watermark Engine (FIXED transparency) ----------
+# ---------- PDF Logo Watermark Engine (FIXED transparency, no BytesIO error) ----------
 def pdf_logo_watermark(
     src,
     out,
@@ -291,13 +291,8 @@ def pdf_logo_watermark(
                 x = (w - target_width) / 2
                 y = (h - target_height) / 2
 
-            # Save the modified logo to a temporary bytes buffer as PNG
-            img_buffer = io.BytesIO()
-            logo_img.save(img_buffer, format='PNG')
-            img_buffer.seek(0)
-
-            # Draw the modified image (now with correct alpha)
-            c.drawImage(img_buffer, x, y, width=target_width, height=target_height, mask='auto')
+            # Draw the PIL image directly (preserves transparency)
+            c.drawInlineImage(logo_img, x, y, width=target_width, height=target_height)
             c.save()
 
             packet.seek(0)
@@ -2063,83 +2058,109 @@ async def callback_router(c, cq):
             if uid in user_states:
                 del user_states[uid]
 
-    # Settings handlers...
+    # ---------- PDF Settings handlers (in-place editing) ----------
     elif data.startswith("set_"):
         try:
             await cq.answer()
         except QueryIdInvalid:
             pass
         uid = cq.from_user.id
+
         if data == "set_wm":
-            await c.send_message(uid, "Send the watermark text (will be saved).")
+            # Edit current message to ask for input
+            await c.edit_message_text(
+                chat_id=cq.message.chat.id,
+                message_id=cq.message.id,
+                text="Send the watermark text (will be saved).",
+                reply_markup=None
+            )
             try:
-                try:
-                    msg = await c.listen(chat_id=uid, timeout=120)
-                except (asyncio.TimeoutError, ListenerTimeout):
-                    return await c.send_message(uid, "Timeout or cancelled.", reply_markup=settings_keyboard())
-                if msg is None or not getattr(msg, "text", None):
-                    return await c.send_message(uid, "Timeout or cancelled.", reply_markup=settings_keyboard())
+                msg = await c.listen(chat_id=uid, timeout=120)
+                if msg is None or not msg.text:
+                    await show_settings_inplace(c, cq)
+                    return
                 set_user_defaults(uid, watermark=msg.text.strip())
-                return await c.send_message(uid, "✅ Default watermark saved.", reply_markup=settings_keyboard())
+                await show_settings_inplace(c, cq)
             except Exception:
-                return await c.send_message(uid, "Timeout or error.", reply_markup=settings_keyboard())
+                await show_settings_inplace(c, cq)
+            return
+
         elif data == "set_link":
-            await c.send_message(uid, "Send the default link (full URL).")
+            await c.edit_message_text(
+                chat_id=cq.message.chat.id,
+                message_id=cq.message.id,
+                text="Send the default link (full URL).",
+                reply_markup=None
+            )
             try:
-                try:
-                    msg = await c.listen(chat_id=uid, timeout=120)
-                except (asyncio.TimeoutError, ListenerTimeout):
-                    return await c.send_message(uid, "Timeout or cancelled.", reply_markup=settings_keyboard())
-                if msg is None or not getattr(msg, "text", None):
-                    return await c.send_message(uid, "Timeout or cancelled.", reply_markup=settings_keyboard())
+                msg = await c.listen(chat_id=uid, timeout=120)
+                if msg is None or not msg.text:
+                    await show_settings_inplace(c, cq)
+                    return
                 set_user_defaults(uid, link=msg.text.strip())
-                return await c.send_message(uid, "✅ Default link saved.", reply_markup=settings_keyboard())
+                await show_settings_inplace(c, cq)
             except Exception:
-                return await c.send_message(uid, "Timeout or error.", reply_markup=settings_keyboard())
+                await show_settings_inplace(c, cq)
+            return
+
         elif data == "set_both":
-            await c.send_message(uid, "Send the watermark text:")
+            await c.edit_message_text(
+                chat_id=cq.message.chat.id,
+                message_id=cq.message.id,
+                text="Send the watermark text:",
+                reply_markup=None
+            )
             try:
-                try:
-                    wm = await c.listen(chat_id=uid, timeout=120)
-                except (asyncio.TimeoutError, ListenerTimeout):
-                    return await c.send_message(uid, "Cancelled.", reply_markup=settings_keyboard())
-                if wm is None or not getattr(wm, "text", None):
-                    return await c.send_message(uid, "Cancelled.", reply_markup=settings_keyboard())
-                await c.send_message(uid, "Send the default link:")
-                try:
-                    lk = await c.listen(chat_id=uid, timeout=120)
-                except (asyncio.TimeoutError, ListenerTimeout):
-                    return await c.send_message(uid, "Cancelled.", reply_markup=settings_keyboard())
-                if lk is None or not getattr(lk, "text", None):
-                    return await c.send_message(uid, "Cancelled.", reply_markup=settings_keyboard())
+                wm = await c.listen(chat_id=uid, timeout=120)
+                if wm is None or not wm.text:
+                    await show_settings_inplace(c, cq)
+                    return
+                # Ask for link in same message
+                await c.edit_message_text(
+                    chat_id=cq.message.chat.id,
+                    message_id=cq.message.id,
+                    text="Send the default link:",
+                    reply_markup=None
+                )
+                lk = await c.listen(chat_id=uid, timeout=120)
+                if lk is None or not lk.text:
+                    await show_settings_inplace(c, cq)
+                    return
                 set_user_defaults(uid, watermark=wm.text.strip(), link=lk.text.strip())
-                return await c.send_message(uid, "✅ Defaults saved.", reply_markup=settings_keyboard())
+                await show_settings_inplace(c, cq)
             except Exception:
-                return await c.send_message(uid, "Timeout or error.", reply_markup=settings_keyboard())
+                await show_settings_inplace(c, cq)
+            return
+
         elif data == "set_clear":
             set_user_defaults(uid, watermark=None, link=None, size=None, color=None, alpha=None, position=None)
             user_settings.delete_one({"user_id": uid})
-            try:
-                await show_settings_inplace(c, cq)
-            except:
-                pass
-            return await c.send_message(uid, "✅ Defaults cleared.", reply_markup=settings_keyboard())
+            await show_settings_inplace(c, cq)
+            return
+
         elif data == "set_size":
-            await c.send_message(uid, "Send watermark size (numeric, e.g., 20):")
+            await c.edit_message_text(
+                chat_id=cq.message.chat.id,
+                message_id=cq.message.id,
+                text="Send watermark size (numeric, e.g., 20):",
+                reply_markup=None
+            )
             try:
-                try:
-                    msg = await c.listen(chat_id=uid, timeout=120)
-                except (asyncio.TimeoutError, ListenerTimeout):
-                    return await c.send_message(uid, "Timeout or cancelled.", reply_markup=settings_keyboard())
-                if msg is None or not getattr(msg, "text", None):
-                    return await c.send_message(uid, "Timeout or cancelled.", reply_markup=settings_keyboard())
+                msg = await c.listen(chat_id=uid, timeout=120)
+                if msg is None or not msg.text:
+                    await show_settings_inplace(c, cq)
+                    return
                 if msg.text.strip().isdigit():
                     set_user_defaults(uid, size=int(msg.text.strip()))
-                    return await c.send_message(uid, "✅ Default watermark size saved.", reply_markup=settings_keyboard())
-                return await c.send_message(uid, "Invalid input (must be a number).", reply_markup=settings_keyboard())
+                else:
+                    await c.send_message(uid, "Invalid input (must be a number).")
+                await show_settings_inplace(c, cq)
             except Exception:
-                return await c.send_message(uid, "Timeout or error.", reply_markup=settings_keyboard())
+                await show_settings_inplace(c, cq)
+            return
+
         elif data == "set_color":
+            # Show color keyboard (already in-place)
             try:
                 await c.edit_message_text(
                     chat_id=cq.message.chat.id,
@@ -2150,25 +2171,32 @@ async def callback_router(c, cq):
             except Exception:
                 await c.send_message(uid, "Choose watermark color:", reply_markup=color_keyboard())
             return
+
         elif data == "set_alpha":
-            await c.send_message(uid, "Send transparency percentage (0-100, 0=fully transparent, 100=fully opaque):")
+            await c.edit_message_text(
+                chat_id=cq.message.chat.id,
+                message_id=cq.message.id,
+                text="Send transparency percentage (0-100, 0=fully transparent, 100=fully opaque):",
+                reply_markup=None
+            )
             try:
-                try:
-                    msg = await c.listen(chat_id=uid, timeout=120)
-                except (asyncio.TimeoutError, ListenerTimeout):
-                    return await c.send_message(uid, "Timeout or cancelled.", reply_markup=settings_keyboard())
-                if msg is None or not getattr(msg, "text", None):
-                    return await c.send_message(uid, "Timeout or cancelled.", reply_markup=settings_keyboard())
+                msg = await c.listen(chat_id=uid, timeout=120)
+                if msg is None or not msg.text:
+                    await show_settings_inplace(c, cq)
+                    return
                 try:
                     alpha = float(msg.text.strip())
                     alpha = max(0.0, min(1.0, alpha / 100.0))
                     set_user_defaults(uid, alpha=alpha)
-                    return await c.send_message(uid, f"✅ Default transparency set to {alpha:.2f}.", reply_markup=settings_keyboard())
                 except ValueError:
-                    return await c.send_message(uid, "Invalid input (must be a number).", reply_markup=settings_keyboard())
+                    await c.send_message(uid, "Invalid input (must be a number).")
+                await show_settings_inplace(c, cq)
             except Exception:
-                return await c.send_message(uid, "Timeout or error.", reply_markup=settings_keyboard())
+                await show_settings_inplace(c, cq)
+            return
+
         elif data == "set_position":
+            # Show position keyboard (already in-place)
             try:
                 await c.edit_message_text(
                     chat_id=cq.message.chat.id,
@@ -2179,25 +2207,20 @@ async def callback_router(c, cq):
             except Exception:
                 await c.send_message(uid, "Choose watermark position:", reply_markup=pdf_position_keyboard())
             return
+
         elif data == "set_back":
-            try:
-                await show_mainmenu_inplace(c, cq)
-            except Exception:
-                await c.send_message(uid, "Back to menu.", reply_markup=get_main_keyboard_for_user(uid))
+            await show_mainmenu_inplace(c, cq)
             return
 
-    # Color picks
+    # Color picks (PDF settings)
     elif data.startswith("color_"):
         color = data.split("_", 1)[1]
-        set_user_defaults(cq.from_user.id, color=color)
+        set_user_defaults(uid, color=color)
         try:
             await cq.answer(f"Color set: {color}")
         except QueryIdInvalid:
             pass
-        try:
-            await show_settings_inplace(c, cq)
-        except Exception:
-            await c.send_message(cq.from_user.id, f"✅ Default watermark color set to {color}.", reply_markup=settings_keyboard())
+        await show_settings_inplace(c, cq)
         return
 
     # PDF Position picks
@@ -2212,18 +2235,15 @@ async def callback_router(c, cq):
             "pdf_pos_d2": "diag_bl_tr",
         }
         if data in pos_map:
-            set_user_defaults(cq.from_user.id, position=pos_map[data])
+            set_user_defaults(uid, position=pos_map[data])
             try:
                 await cq.answer(f"Position set to {pos_map[data].replace('_', ' ').title()}")
             except QueryIdInvalid:
                 pass
-            try:
-                await show_settings_inplace(c, cq)
-            except Exception:
-                await c.send_message(cq.from_user.id, f"✅ Default watermark position set to {pos_map[data].replace('_', ' ').title()}.", reply_markup=settings_keyboard())
+            await show_settings_inplace(c, cq)
         return
 
-    # Image settings handlers
+    # Image settings handlers (already in-place)
     elif data == "img_back":
         try:
             await cq.answer()
@@ -2237,25 +2257,25 @@ async def callback_router(c, cq):
             await cq.answer()
         except QueryIdInvalid:
             pass
-        await c.send_message(uid, "Send size factor (0.5 for small, 1.0 for normal, 2.0 for large):")
+        await c.edit_message_text(
+            chat_id=cq.message.chat.id,
+            message_id=cq.message.id,
+            text="Send size factor (0.5 for small, 1.0 for normal, 2.0 for large):",
+            reply_markup=None
+        )
         try:
-            try:
-                msg = await c.listen(chat_id=uid, timeout=120)
-            except (asyncio.TimeoutError, ListenerTimeout):
-                await c.send_message(uid, "⏳ Timeout! No response.", reply_markup=image_settings_keyboard())
-                return
-            if msg is None or not getattr(msg, "text", None):
-                await c.send_message(uid, "⏳ Timeout! No response.", reply_markup=image_settings_keyboard())
+            msg = await c.listen(chat_id=uid, timeout=120)
+            if msg is None or not msg.text:
+                await show_image_settings_inplace(c, cq)
                 return
             try:
                 size = float(msg.text.strip())
                 update_image_setting(uid, "size_factor", size)
-                await c.send_message(uid, f"✅ Size set to {size}x", reply_markup=image_settings_keyboard())
             except ValueError:
-                await c.send_message(uid, "❌ Invalid number", reply_markup=image_settings_keyboard())
-        except Exception as e:
-            log.exception(f"img_size error: {e}")
-            await c.send_message(uid, "❌ Error setting size", reply_markup=image_settings_keyboard())
+                await c.send_message(uid, "❌ Invalid number")
+            await show_image_settings_inplace(c, cq)
+        except Exception:
+            await show_image_settings_inplace(c, cq)
         return
     
     elif data.startswith("col_"):
@@ -2326,26 +2346,26 @@ async def callback_router(c, cq):
             await cq.answer()
         except QueryIdInvalid:
             pass
-        await c.send_message(uid, "Send transparency percentage (0-100, 0=fully transparent, 100=fully opaque):")
+        await c.edit_message_text(
+            chat_id=cq.message.chat.id,
+            message_id=cq.message.id,
+            text="Send transparency percentage (0-100, 0=fully transparent, 100=fully opaque):",
+            reply_markup=None
+        )
         try:
-            try:
-                msg = await c.listen(chat_id=uid, timeout=120)
-            except (asyncio.TimeoutError, ListenerTimeout):
-                await c.send_message(uid, "⏳ Timeout! No response.", reply_markup=image_settings_keyboard())
-                return
-            if msg is None or not getattr(msg, "text", None):
-                await c.send_message(uid, "⏳ Timeout! No response.", reply_markup=image_settings_keyboard())
+            msg = await c.listen(chat_id=uid, timeout=120)
+            if msg is None or not msg.text:
+                await show_image_settings_inplace(c, cq)
                 return
             try:
                 alpha = int(msg.text.strip())
                 alpha = max(0, min(100, alpha))
                 update_image_setting(uid, "alpha", int(alpha * 2.55))
-                await c.send_message(uid, f"✅ Transparency set to {alpha}%", reply_markup=image_settings_keyboard())
             except ValueError:
-                await c.send_message(uid, "❌ Invalid number", reply_markup=image_settings_keyboard())
-        except Exception as e:
-            log.exception(f"img_alpha error: {e}")
-            await c.send_message(uid, "❌ Error setting transparency", reply_markup=image_settings_keyboard())
+                await c.send_message(uid, "❌ Invalid number")
+            await show_image_settings_inplace(c, cq)
+        except Exception:
+            await show_image_settings_inplace(c, cq)
         return
     
     elif data == "img_font":
@@ -2408,24 +2428,24 @@ async def callback_router(c, cq):
             await cq.answer()
         except QueryIdInvalid:
             pass
-        await c.send_message(uid, "Send default watermark text for images:")
+        await c.edit_message_text(
+            chat_id=cq.message.chat.id,
+            message_id=cq.message.id,
+            text="Send default watermark text for images:",
+            reply_markup=None
+        )
         try:
-            try:
-                msg = await c.listen(chat_id=uid, timeout=120)
-            except (asyncio.TimeoutError, ListenerTimeout):
-                await c.send_message(uid, "⏳ Timeout! No text received", reply_markup=image_settings_keyboard())
-                return
-            if msg is None or not getattr(msg, "text", None):
-                await c.send_message(uid, "⏳ Timeout! No text received", reply_markup=image_settings_keyboard())
+            msg = await c.listen(chat_id=uid, timeout=120)
+            if msg is None or not msg.text:
+                await show_image_settings_inplace(c, cq)
                 return
             update_image_setting(uid, "default_text", msg.text.strip())
-            await c.send_message(uid, f"✅ Default image watermark text set to: {msg.text.strip()}", reply_markup=image_settings_keyboard())
-        except Exception as e:
-            log.exception(f"img_default_text error: {e}")
-            await c.send_message(uid, "❌ Error setting default text", reply_markup=image_settings_keyboard())
+            await show_image_settings_inplace(c, cq)
+        except Exception:
+            await show_image_settings_inplace(c, cq)
         return
 
-    # ---------- Logo settings callbacks (FIXED in-place editing) ----------
+    # ---------- Logo settings callbacks (in-place) ----------
     elif data == "logo_back":
         try:
             await cq.answer()
@@ -2439,7 +2459,6 @@ async def callback_router(c, cq):
             await cq.answer()
         except QueryIdInvalid:
             pass
-        # Ask for input in the same message
         await c.edit_message_text(
             chat_id=cq.message.chat.id,
             message_id=cq.message.id,
@@ -2449,18 +2468,15 @@ async def callback_router(c, cq):
         try:
             msg = await c.listen(chat_id=uid, timeout=120)
             if msg is None or not msg.text:
-                # restore settings message
                 await show_logo_settings_inplace(c, cq)
                 return
             try:
                 size = float(msg.text.strip())
                 set_logo_defaults(uid, size=size)
-                # Show updated settings in the same message
-                await show_logo_settings_inplace(c, cq)
             except ValueError:
-                await c.send_message(uid, "❌ Invalid number.", reply_markup=logo_settings_keyboard())
-        except Exception as e:
-            log.exception("logo_set_size error")
+                await c.send_message(uid, "❌ Invalid number.")
+            await show_logo_settings_inplace(c, cq)
+        except Exception:
             await show_logo_settings_inplace(c, cq)
         return
 
@@ -2517,11 +2533,10 @@ async def callback_router(c, cq):
                 alpha = float(msg.text.strip())
                 alpha = max(0.0, min(1.0, alpha))
                 set_logo_defaults(uid, alpha=alpha)
-                await show_logo_settings_inplace(c, cq)
             except ValueError:
-                await c.send_message(uid, "❌ Invalid number.", reply_markup=logo_settings_keyboard())
-        except Exception as e:
-            log.exception("logo_set_alpha error")
+                await c.send_message(uid, "❌ Invalid number.")
+            await show_logo_settings_inplace(c, cq)
+        except Exception:
             await show_logo_settings_inplace(c, cq)
         return
 
@@ -2634,10 +2649,7 @@ async def watermark_cmd(c, m):
 @app.on_message(filters.command("logo") & filters.private & filters.reply)
 async def logo_cmd_reply(c, m):
     record_user(m.from_user.id)
-    # For simplicity, we just tell user to use without reply.
     await m.reply("Please use /logo without reply to start the interactive logo watermark process.")
-    # If you prefer, you can start the interactive flow directly:
-    # await process_logo_watermark_interactive(c, m.chat.id, m.from_user.id)
 
 @app.on_message(filters.command("logo") & filters.private & ~filters.reply)
 async def logo_cmd(c, m):
