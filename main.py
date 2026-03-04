@@ -31,7 +31,7 @@ from utils.premium_utils import (
 from utils.settings_utils import (
     set_user_defaults, get_user_defaults,
     set_image_settings, get_image_settings, update_image_setting,
-    get_logo_defaults, set_logo_defaults          # <-- new
+    get_logo_defaults, set_logo_defaults
 )
 from utils.image_utils import create_image_watermark
 from utils.merge_utils import merge_pdfs
@@ -218,7 +218,7 @@ def pdf_watermark(
         except:
             return False
 
-# ---------- NEW: PDF Logo Watermark Engine ----------
+# ---------- PDF Logo Watermark Engine (FIXED transparency) ----------
 def pdf_logo_watermark(
     src,
     out,
@@ -231,12 +231,22 @@ def pdf_logo_watermark(
     Add a logo image as a watermark to every page of a PDF.
     - size_factor: fraction of page width (e.g., 0.2 = 20% of width)
     - position_override: e.g., 'bottom_right', 'center'
-    - alpha_override: currently not used (relies on PNG transparency)
+    - alpha_override: float 0.0 (transparent) to 1.0 (opaque)
     """
     try:
         from PIL import Image
-        logo_img = Image.open(logo_path)
+
+        # Load logo and convert to RGBA (to handle alpha)
+        logo_img = Image.open(logo_path).convert("RGBA")
         logo_width, logo_height = logo_img.size
+
+        # Apply user alpha if given (0.0-1.0)
+        if alpha_override is not None:
+            # Split channels
+            r, g, b, a = logo_img.split()
+            # Multiply alpha by user alpha
+            a = a.point(lambda p: int(p * alpha_override))
+            logo_img = Image.merge("RGBA", (r, g, b, a))
 
         rd = PdfReader(src)
         wr = PdfWriter()
@@ -281,8 +291,13 @@ def pdf_logo_watermark(
                 x = (w - target_width) / 2
                 y = (h - target_height) / 2
 
-            # Draw image (PNG transparency is preserved)
-            c.drawInlineImage(logo_img, x, y, width=target_width, height=target_height)
+            # Save the modified logo to a temporary bytes buffer as PNG
+            img_buffer = io.BytesIO()
+            logo_img.save(img_buffer, format='PNG')
+            img_buffer.seek(0)
+
+            # Draw the modified image (now with correct alpha)
+            c.drawImage(img_buffer, x, y, width=target_width, height=target_height, mask='auto')
             c.save()
 
             packet.seek(0)
@@ -314,11 +329,11 @@ async def set_bot_commands():
             BotCommand("pdf", "Add watermark & link to PDF (Premium)"),
             BotCommand("link", "Add only link to PDF (Premium)"),
             BotCommand("watermark", "Add only watermark to PDF (Premium)"),
-            BotCommand("logo", "Add logo watermark to PDF (Premium)"),                # new
+            BotCommand("logo", "Add logo watermark to PDF (Premium)"),
             BotCommand("image", "Add watermark to image (Premium)"),
             BotCommand("settings", "Configure PDF settings"),
             BotCommand("image_settings", "Configure image watermark settings"),
-            BotCommand("logo_settings", "Configure logo watermark settings"),        # new
+            BotCommand("logo_settings", "Configure logo watermark settings"),
             BotCommand("myplan", "Check your premium status"),
             BotCommand("contact_owner", "Contact bot owner"),
             BotCommand("merge", "Merge multiple PDFs (Premium)"),
@@ -358,10 +373,10 @@ def keyboard_main_for_premium():
         [InlineKeyboardButton("🔹 PDF Watermark & Link", callback_data="cmd_start")],
         [InlineKeyboardButton("🔗 PDF Only Link", callback_data="cmd_link"), 
          InlineKeyboardButton("🖋️ PDF Only Watermark", callback_data="cmd_watermark")],
-        [InlineKeyboardButton("🖼️ PDF Logo Watermark", callback_data="cmd_logo_watermark")],   # new
+        [InlineKeyboardButton("🖼️ PDF Logo Watermark", callback_data="cmd_logo_watermark")],
         [InlineKeyboardButton("⚙️ Image Settings", callback_data="cmd_image_settings"), 
          InlineKeyboardButton("⚙️ PDF Settings", callback_data="cmd_settings")],
-        [InlineKeyboardButton("⚙️ Logo Settings", callback_data="cmd_logo_settings")],          # new
+        [InlineKeyboardButton("⚙️ Logo Settings", callback_data="cmd_logo_settings")],
         [InlineKeyboardButton("🔄 Merge PDF", callback_data="cmd_merge_pdf"), 
          InlineKeyboardButton("✂️ Split PDF", callback_data="cmd_split_pdf")],
         [InlineKeyboardButton("💳 MyPlan", callback_data="cmd_myplan"), 
@@ -519,7 +534,7 @@ def image_transform_keyboard():
     ]
     return InlineKeyboardMarkup(kb)
 
-# ---------- NEW: Logo Settings Keyboards ----------
+# Logo Settings Keyboards
 def logo_settings_keyboard():
     kb = [
         [InlineKeyboardButton("Size factor", callback_data="logo_set_size")],
@@ -757,7 +772,7 @@ async def show_image_settings_inplace(client, cq):
     except Exception:
         await client.send_message(uid, text, reply_markup=image_settings_keyboard())
 
-# ---------- NEW: Show Logo Settings In‑place ----------
+# ---------- Logo Settings In-place ----------
 async def show_logo_settings_inplace(client, cq):
     uid = cq.from_user.id
     settings = get_logo_defaults(uid)
@@ -765,7 +780,7 @@ async def show_logo_settings_inplace(client, cq):
         f"🖼️ PDF Logo Watermark Settings:\n\n"
         f"Size factor: {settings.get('size_factor', 0.2)} (relative to page width)\n"
         f"Position: {settings.get('position', 'bottom_right')}\n"
-        f"Transparency: {settings.get('alpha', 0.8)} (0‑1, PNG only)\n\n"
+        f"Transparency: {settings.get('alpha', 0.8)} (0‑1)\n\n"
         f"Use buttons to change."
     )
     try:
@@ -1231,7 +1246,7 @@ async def process_watermark_interactive(client, chat_id, user_id):
         await ask_msg.delete()
         await client.send_message(chat_id, f"❌ Error during watermark processing: {str(e)[:200]}")
 
-# ---------- NEW: Logo Watermark Interactive Flow ----------
+# ---------- Logo Watermark Interactive Flow ----------
 async def process_logo_watermark_interactive(client, chat_id, user_id):
     if not is_premium_user(user_id):
         await client.send_message(chat_id, "⚠️ Only premium users can use this feature.")
@@ -1710,7 +1725,7 @@ async def callback_router(c, cq):
             pass
         await process_watermark_interactive(c, cq.message.chat.id, uid)
         return
-    elif data == "cmd_logo_watermark":                     # new
+    elif data == "cmd_logo_watermark":
         try:
             await cq.answer()
         except QueryIdInvalid:
@@ -1731,7 +1746,7 @@ async def callback_router(c, cq):
             pass
         await show_image_settings_inplace(c, cq)
         return
-    elif data == "cmd_logo_settings":                      # new
+    elif data == "cmd_logo_settings":
         try:
             await cq.answer()
         except QueryIdInvalid:
@@ -2410,7 +2425,7 @@ async def callback_router(c, cq):
             await c.send_message(uid, "❌ Error setting default text", reply_markup=image_settings_keyboard())
         return
 
-    # ---------- NEW: Logo settings callbacks ----------
+    # ---------- Logo settings callbacks (FIXED in-place editing) ----------
     elif data == "logo_back":
         try:
             await cq.answer()
@@ -2424,20 +2439,29 @@ async def callback_router(c, cq):
             await cq.answer()
         except QueryIdInvalid:
             pass
-        await c.send_message(uid, "Send size factor (e.g., 0.2 for 20% of page width):")
+        # Ask for input in the same message
+        await c.edit_message_text(
+            chat_id=cq.message.chat.id,
+            message_id=cq.message.id,
+            text="Send size factor (e.g., 0.2 for 20% of page width):",
+            reply_markup=None
+        )
         try:
             msg = await c.listen(chat_id=uid, timeout=120)
             if msg is None or not msg.text:
-                return await c.send_message(uid, "⏳ Timeout! No response.", reply_markup=logo_settings_keyboard())
+                # restore settings message
+                await show_logo_settings_inplace(c, cq)
+                return
             try:
                 size = float(msg.text.strip())
                 set_logo_defaults(uid, size=size)
-                await c.send_message(uid, f"✅ Logo size factor set to {size}.", reply_markup=logo_settings_keyboard())
+                # Show updated settings in the same message
+                await show_logo_settings_inplace(c, cq)
             except ValueError:
                 await c.send_message(uid, "❌ Invalid number.", reply_markup=logo_settings_keyboard())
         except Exception as e:
             log.exception("logo_set_size error")
-            await c.send_message(uid, "❌ Error.", reply_markup=logo_settings_keyboard())
+            await show_logo_settings_inplace(c, cq)
         return
 
     elif data == "logo_set_position":
@@ -2478,21 +2502,27 @@ async def callback_router(c, cq):
             await cq.answer()
         except QueryIdInvalid:
             pass
-        await c.send_message(uid, "Send transparency value (0.0 = fully transparent, 1.0 = fully opaque):")
+        await c.edit_message_text(
+            chat_id=cq.message.chat.id,
+            message_id=cq.message.id,
+            text="Send transparency value (0.0 = fully transparent, 1.0 = fully opaque):",
+            reply_markup=None
+        )
         try:
             msg = await c.listen(chat_id=uid, timeout=120)
             if msg is None or not msg.text:
-                return await c.send_message(uid, "⏳ Timeout! No response.", reply_markup=logo_settings_keyboard())
+                await show_logo_settings_inplace(c, cq)
+                return
             try:
                 alpha = float(msg.text.strip())
                 alpha = max(0.0, min(1.0, alpha))
                 set_logo_defaults(uid, alpha=alpha)
-                await c.send_message(uid, f"✅ Logo transparency set to {alpha}.", reply_markup=logo_settings_keyboard())
+                await show_logo_settings_inplace(c, cq)
             except ValueError:
                 await c.send_message(uid, "❌ Invalid number.", reply_markup=logo_settings_keyboard())
         except Exception as e:
             log.exception("logo_set_alpha error")
-            await c.send_message(uid, "❌ Error.", reply_markup=logo_settings_keyboard())
+            await show_logo_settings_inplace(c, cq)
         return
 
     # Owner reply handler
@@ -2600,7 +2630,7 @@ async def watermark_cmd(c, m):
     record_user(m.from_user.id)
     await process_watermark_interactive(c, m.chat.id, m.from_user.id)
 
-# ---------- NEW: Logo command ----------
+# Logo command
 @app.on_message(filters.command("logo") & filters.private & filters.reply)
 async def logo_cmd_reply(c, m):
     record_user(m.from_user.id)
@@ -2614,7 +2644,7 @@ async def logo_cmd(c, m):
     record_user(m.from_user.id)
     await process_logo_watermark_interactive(c, m.chat.id, m.from_user.id)
 
-# ---------- Image command ----------
+# Image command with reply support
 @app.on_message(filters.command("image") & filters.private & filters.reply)
 async def image_cmd_reply(c, m):
     record_user(m.from_user.id)
@@ -2843,7 +2873,7 @@ async def image_settings_cmd(c, m):
     )
     await m.reply(text, reply_markup=image_settings_keyboard())
 
-# ---------- NEW: Logo settings command ----------
+# Logo settings command
 @app.on_message(filters.command("logo_settings") & filters.private)
 async def logo_settings_cmd(c, m):
     record_user(m.from_user.id)
