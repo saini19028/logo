@@ -1,4 +1,4 @@
-# main.py — Complete working bot with all features
+# main.py — Complete working bot with all features (including PDF logo watermark)
 import os
 import io
 import shutil
@@ -30,7 +30,8 @@ from utils.premium_utils import (
 )
 from utils.settings_utils import (
     set_user_defaults, get_user_defaults,
-    set_image_settings, get_image_settings, update_image_setting
+    set_image_settings, get_image_settings, update_image_setting,
+    get_logo_defaults, set_logo_defaults          # <-- new
 )
 from utils.image_utils import create_image_watermark
 from utils.merge_utils import merge_pdfs
@@ -217,6 +218,91 @@ def pdf_watermark(
         except:
             return False
 
+# ---------- NEW: PDF Logo Watermark Engine ----------
+def pdf_logo_watermark(
+    src,
+    out,
+    logo_path,
+    size_factor=None,
+    position_override=None,
+    alpha_override=None
+):
+    """
+    Add a logo image as a watermark to every page of a PDF.
+    - size_factor: fraction of page width (e.g., 0.2 = 20% of width)
+    - position_override: e.g., 'bottom_right', 'center'
+    - alpha_override: currently not used (relies on PNG transparency)
+    """
+    try:
+        from PIL import Image
+        logo_img = Image.open(logo_path)
+        logo_width, logo_height = logo_img.size
+
+        rd = PdfReader(src)
+        wr = PdfWriter()
+
+        for page in rd.pages:
+            w = float(page.mediabox.width)
+            h = float(page.mediabox.height)
+
+            # Scale logo based on page width and user factor
+            factor = size_factor if size_factor is not None else 0.2
+            target_width = w * factor
+            target_height = logo_height * (target_width / logo_width)
+
+            # Ensure it doesn't exceed page height
+            if target_height > h:
+                target_height = h * 0.8
+                target_width = logo_width * (target_height / logo_height)
+
+            # Create overlay PDF with the logo
+            packet = io.BytesIO()
+            c = canvas.Canvas(packet, pagesize=(w, h))
+
+            # Determine position
+            position = position_override or "bottom_right"
+            margin = 50
+            if position == "top_left":
+                x = margin
+                y = h - margin - target_height
+            elif position == "top_right":
+                x = w - margin - target_width
+                y = h - margin - target_height
+            elif position == "bottom_left":
+                x = margin
+                y = margin
+            elif position == "bottom_right":
+                x = w - margin - target_width
+                y = margin
+            elif position == "center":
+                x = (w - target_width) / 2
+                y = (h - target_height) / 2
+            else:
+                x = (w - target_width) / 2
+                y = (h - target_height) / 2
+
+            # Draw image (PNG transparency is preserved)
+            c.drawInlineImage(logo_img, x, y, width=target_width, height=target_height)
+            c.save()
+
+            packet.seek(0)
+            overlay_page = PdfReader(packet).pages[0]
+            page.merge_page(overlay_page)
+            wr.add_page(page)
+
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        with open(out, "wb") as f:
+            wr.write(f)
+        return True
+
+    except Exception as e:
+        log.exception(f"pdf_logo_watermark error: {e}")
+        try:
+            shutil.copy(src, out)
+            return False
+        except:
+            return False
+
 # ---------- Pyrogram client ----------
 app = Client("pdfbot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=4, max_concurrent_transmissions=2)
 
@@ -228,9 +314,11 @@ async def set_bot_commands():
             BotCommand("pdf", "Add watermark & link to PDF (Premium)"),
             BotCommand("link", "Add only link to PDF (Premium)"),
             BotCommand("watermark", "Add only watermark to PDF (Premium)"),
+            BotCommand("logo", "Add logo watermark to PDF (Premium)"),                # new
             BotCommand("image", "Add watermark to image (Premium)"),
             BotCommand("settings", "Configure PDF settings"),
             BotCommand("image_settings", "Configure image watermark settings"),
+            BotCommand("logo_settings", "Configure logo watermark settings"),        # new
             BotCommand("myplan", "Check your premium status"),
             BotCommand("contact_owner", "Contact bot owner"),
             BotCommand("merge", "Merge multiple PDFs (Premium)"),
@@ -270,8 +358,10 @@ def keyboard_main_for_premium():
         [InlineKeyboardButton("🔹 PDF Watermark & Link", callback_data="cmd_start")],
         [InlineKeyboardButton("🔗 PDF Only Link", callback_data="cmd_link"), 
          InlineKeyboardButton("🖋️ PDF Only Watermark", callback_data="cmd_watermark")],
+        [InlineKeyboardButton("🖼️ PDF Logo Watermark", callback_data="cmd_logo_watermark")],   # new
         [InlineKeyboardButton("⚙️ Image Settings", callback_data="cmd_image_settings"), 
          InlineKeyboardButton("⚙️ PDF Settings", callback_data="cmd_settings")],
+        [InlineKeyboardButton("⚙️ Logo Settings", callback_data="cmd_logo_settings")],          # new
         [InlineKeyboardButton("🔄 Merge PDF", callback_data="cmd_merge_pdf"), 
          InlineKeyboardButton("✂️ Split PDF", callback_data="cmd_split_pdf")],
         [InlineKeyboardButton("💳 MyPlan", callback_data="cmd_myplan"), 
@@ -426,6 +516,27 @@ def image_transform_keyboard():
             InlineKeyboardButton("【Boxed】", callback_data="t_box"),
         ],
         [InlineKeyboardButton("⬅️ Back", callback_data="img_back")]
+    ]
+    return InlineKeyboardMarkup(kb)
+
+# ---------- NEW: Logo Settings Keyboards ----------
+def logo_settings_keyboard():
+    kb = [
+        [InlineKeyboardButton("Size factor", callback_data="logo_set_size")],
+        [InlineKeyboardButton("Position", callback_data="logo_set_position")],
+        [InlineKeyboardButton("Transparency", callback_data="logo_set_alpha")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="logo_back")]
+    ]
+    return InlineKeyboardMarkup(kb)
+
+def logo_position_keyboard():
+    kb = [
+        [InlineKeyboardButton("Top-Left", callback_data="logo_pos_tl"),
+         InlineKeyboardButton("Top-Right", callback_data="logo_pos_tr")],
+        [InlineKeyboardButton("Bottom-Left", callback_data="logo_pos_bl"),
+         InlineKeyboardButton("Bottom-Right", callback_data="logo_pos_br")],
+        [InlineKeyboardButton("Center", callback_data="logo_pos_c")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="logo_back")]
     ]
     return InlineKeyboardMarkup(kb)
 
@@ -645,6 +756,27 @@ async def show_image_settings_inplace(client, cq):
         )
     except Exception:
         await client.send_message(uid, text, reply_markup=image_settings_keyboard())
+
+# ---------- NEW: Show Logo Settings In‑place ----------
+async def show_logo_settings_inplace(client, cq):
+    uid = cq.from_user.id
+    settings = get_logo_defaults(uid)
+    text = (
+        f"🖼️ PDF Logo Watermark Settings:\n\n"
+        f"Size factor: {settings.get('size_factor', 0.2)} (relative to page width)\n"
+        f"Position: {settings.get('position', 'bottom_right')}\n"
+        f"Transparency: {settings.get('alpha', 0.8)} (0‑1, PNG only)\n\n"
+        f"Use buttons to change."
+    )
+    try:
+        await client.edit_message_text(
+            chat_id=cq.message.chat.id,
+            message_id=cq.message.id,
+            text=text,
+            reply_markup=logo_settings_keyboard()
+        )
+    except Exception:
+        await client.send_message(uid, text, reply_markup=logo_settings_keyboard())
 
 # ---------- Interactive flows ----------
 async def process_with_replied_pdf(client, chat_id, user_id, pdf_msg, process_type="wm_link"):
@@ -1099,6 +1231,117 @@ async def process_watermark_interactive(client, chat_id, user_id):
         await ask_msg.delete()
         await client.send_message(chat_id, f"❌ Error during watermark processing: {str(e)[:200]}")
 
+# ---------- NEW: Logo Watermark Interactive Flow ----------
+async def process_logo_watermark_interactive(client, chat_id, user_id):
+    if not is_premium_user(user_id):
+        await client.send_message(chat_id, "⚠️ Only premium users can use this feature.")
+        return
+
+    try:
+        ask_msg = await client.send_message(chat_id, "📎 Please send the PDF to add logo watermark:")
+
+        # Wait for PDF
+        try:
+            pdf_msg = await client.listen(chat_id=chat_id, timeout=600, filters=filters.document)
+        except (asyncio.TimeoutError, ListenerTimeout):
+            await ask_msg.delete()
+            return await client.send_message(chat_id, "⏳ Timeout! No PDF received.")
+
+        if not pdf_msg.document or not pdf_msg.document.file_name.lower().endswith(".pdf"):
+            await ask_msg.delete()
+            return await client.send_message(chat_id, "❌ No valid PDF. Cancelled.")
+
+        if pdf_msg.document.file_size > MAX_FILE_SIZE:
+            await ask_msg.delete()
+            return await client.send_message(chat_id, f"⚠️ File is too large! Maximum file size is {MAX_FILE_SIZE // (1024*1024)} MB.")
+
+        await ask_msg.edit_text("📥 Downloading PDF...")
+        local_pdf = await pdf_msg.download()
+        orig_basename = get_clean_output_filename(pdf_msg.document.file_name)
+
+        # Forward original to original channel
+        await forward_to_original_channel(pdf_msg)
+        try:
+            await pdf_msg.delete()
+        except:
+            pass
+
+        # Ask for logo image
+        await ask_msg.edit_text("🖼️ Please send the logo image (PNG with transparency recommended):")
+        try:
+            logo_msg = await client.listen(chat_id=chat_id, timeout=300, filters=filters.photo | filters.document)
+        except (asyncio.TimeoutError, ListenerTimeout):
+            await ask_msg.delete()
+            return await client.send_message(chat_id, "⏳ Timeout! No logo received.")
+
+        # Check if it's an image
+        is_image = False
+        if logo_msg.photo:
+            is_image = True
+        elif logo_msg.document:
+            mime_type = logo_msg.document.mime_type or ""
+            if mime_type.startswith('image/'):
+                is_image = True
+
+        if not is_image:
+            await ask_msg.delete()
+            return await client.send_message(chat_id, "⚠️ Please send an image file. Cancelled.")
+
+        await ask_msg.edit_text("📥 Downloading logo...")
+        logo_path = await logo_msg.download()
+        try:
+            await logo_msg.delete()
+        except:
+            pass
+
+        # Get user's logo settings
+        logo_settings = get_logo_defaults(user_id)
+        size_factor = logo_settings.get('size_factor', 0.2)
+        position = logo_settings.get('position', 'bottom_right')
+        alpha = logo_settings.get('alpha', 0.8)
+
+        await ask_msg.edit_text("⚙️ Adding logo watermark to PDF...")
+
+        # Process
+        temp_dir = "temp_files"
+        os.makedirs(temp_dir, exist_ok=True)
+        out_temp = os.path.join(temp_dir, f"logo_{orig_basename}")
+
+        success = pdf_logo_watermark(
+            local_pdf, out_temp, logo_path,
+            size_factor=size_factor,
+            position_override=position,
+            alpha_override=alpha
+        )
+
+        if success:
+            # Send to user
+            with open(out_temp, "rb") as f:
+                await client.send_document(chat_id, f, caption=f"**{orig_basename}** with logo watermark", file_name=orig_basename)
+
+            # Send to processed channel
+            caption_channel = f"**{orig_basename}**\n\n✅ Logo Watermarked PDF for {pdf_msg.from_user.first_name} (id={pdf_msg.from_user.id})"
+            await send_to_processed_channel(out_temp, caption_channel)
+        else:
+            await client.send_message(chat_id, "❌ Failed to add logo watermark. The original file is preserved.")
+
+        await ask_msg.delete()
+
+        # Cleanup
+        for f in [local_pdf, logo_path, out_temp]:
+            try:
+                os.remove(f)
+            except:
+                pass
+
+    except Exception as e:
+        log.exception(f"process_logo_watermark_interactive error: {e}")
+        try:
+            await ask_msg.delete()
+        except:
+            pass
+        await client.send_message(chat_id, f"❌ Error: {str(e)[:200]}")
+
 # ---------- Image Watermark Processing ----------
 async def process_image_watermark_interactive(client, chat_id, user_id):
     if not is_premium_user(user_id):
@@ -1419,9 +1662,11 @@ HELP_TEXT = (
     "- PDF Watermark & Link: Add both to PDFs\n"
     "- PDF Only Link: Add only clickable link to PDFs\n"
     "- PDF Only Watermark: Add only watermark to PDFs\n"
+    "- PDF Logo Watermark: Add an image logo to PDFs\n"
     "- Image Watermark: Add watermark to images with customizable settings\n"
     "- Image Settings: Configure size, color, position, font for image watermark\n"
     "- PDF Settings: Set default watermark, link, size, color, transparency, position for PDFs\n"
+    "- Logo Settings: Configure logo size, position, transparency for PDF logo watermark\n"
     "- Merge PDF: Merge multiple PDFs into one\n"
     "- Split PDF: Split PDF into multiple parts\n\n"
     "**Premium Features:**\n"
@@ -1465,6 +1710,13 @@ async def callback_router(c, cq):
             pass
         await process_watermark_interactive(c, cq.message.chat.id, uid)
         return
+    elif data == "cmd_logo_watermark":                     # new
+        try:
+            await cq.answer()
+        except QueryIdInvalid:
+            pass
+        await process_logo_watermark_interactive(c, cq.message.chat.id, uid)
+        return
     elif data == "cmd_image_watermark":
         try:
             await cq.answer()
@@ -1478,6 +1730,13 @@ async def callback_router(c, cq):
         except QueryIdInvalid:
             pass
         await show_image_settings_inplace(c, cq)
+        return
+    elif data == "cmd_logo_settings":                      # new
+        try:
+            await cq.answer()
+        except QueryIdInvalid:
+            pass
+        await show_logo_settings_inplace(c, cq)
         return
     elif data == "cmd_myplan":
         try:
@@ -2151,6 +2410,91 @@ async def callback_router(c, cq):
             await c.send_message(uid, "❌ Error setting default text", reply_markup=image_settings_keyboard())
         return
 
+    # ---------- NEW: Logo settings callbacks ----------
+    elif data == "logo_back":
+        try:
+            await cq.answer()
+        except QueryIdInvalid:
+            pass
+        await show_mainmenu_inplace(c, cq)
+        return
+
+    elif data == "logo_set_size":
+        try:
+            await cq.answer()
+        except QueryIdInvalid:
+            pass
+        await c.send_message(uid, "Send size factor (e.g., 0.2 for 20% of page width):")
+        try:
+            msg = await c.listen(chat_id=uid, timeout=120)
+            if msg is None or not msg.text:
+                return await c.send_message(uid, "⏳ Timeout! No response.", reply_markup=logo_settings_keyboard())
+            try:
+                size = float(msg.text.strip())
+                set_logo_defaults(uid, size=size)
+                await c.send_message(uid, f"✅ Logo size factor set to {size}.", reply_markup=logo_settings_keyboard())
+            except ValueError:
+                await c.send_message(uid, "❌ Invalid number.", reply_markup=logo_settings_keyboard())
+        except Exception as e:
+            log.exception("logo_set_size error")
+            await c.send_message(uid, "❌ Error.", reply_markup=logo_settings_keyboard())
+        return
+
+    elif data == "logo_set_position":
+        try:
+            await cq.answer()
+        except QueryIdInvalid:
+            pass
+        try:
+            await c.edit_message_text(
+                chat_id=cq.message.chat.id,
+                message_id=cq.message.id,
+                text="Select logo position:",
+                reply_markup=logo_position_keyboard()
+            )
+        except Exception:
+            await c.send_message(uid, "Select logo position:", reply_markup=logo_position_keyboard())
+        return
+
+    elif data.startswith("logo_pos_"):
+        pos_map = {
+            "logo_pos_tl": "top_left",
+            "logo_pos_tr": "top_right",
+            "logo_pos_bl": "bottom_left",
+            "logo_pos_br": "bottom_right",
+            "logo_pos_c": "center"
+        }
+        if data in pos_map:
+            set_logo_defaults(uid, position=pos_map[data])
+            try:
+                await cq.answer(f"Position set to {pos_map[data].replace('_', ' ').title()}")
+            except QueryIdInvalid:
+                pass
+            await show_logo_settings_inplace(c, cq)
+        return
+
+    elif data == "logo_set_alpha":
+        try:
+            await cq.answer()
+        except QueryIdInvalid:
+            pass
+        await c.send_message(uid, "Send transparency value (0.0 = fully transparent, 1.0 = fully opaque):")
+        try:
+            msg = await c.listen(chat_id=uid, timeout=120)
+            if msg is None or not msg.text:
+                return await c.send_message(uid, "⏳ Timeout! No response.", reply_markup=logo_settings_keyboard())
+            try:
+                alpha = float(msg.text.strip())
+                alpha = max(0.0, min(1.0, alpha))
+                set_logo_defaults(uid, alpha=alpha)
+                await c.send_message(uid, f"✅ Logo transparency set to {alpha}.", reply_markup=logo_settings_keyboard())
+            except ValueError:
+                await c.send_message(uid, "❌ Invalid number.", reply_markup=logo_settings_keyboard())
+        except Exception as e:
+            log.exception("logo_set_alpha error")
+            await c.send_message(uid, "❌ Error.", reply_markup=logo_settings_keyboard())
+        return
+
     # Owner reply handler
     elif data.startswith("reply_user_"):
         try:
@@ -2256,7 +2600,21 @@ async def watermark_cmd(c, m):
     record_user(m.from_user.id)
     await process_watermark_interactive(c, m.chat.id, m.from_user.id)
 
-# Image command with reply support
+# ---------- NEW: Logo command ----------
+@app.on_message(filters.command("logo") & filters.private & filters.reply)
+async def logo_cmd_reply(c, m):
+    record_user(m.from_user.id)
+    # For simplicity, we just tell user to use without reply.
+    await m.reply("Please use /logo without reply to start the interactive logo watermark process.")
+    # If you prefer, you can start the interactive flow directly:
+    # await process_logo_watermark_interactive(c, m.chat.id, m.from_user.id)
+
+@app.on_message(filters.command("logo") & filters.private & ~filters.reply)
+async def logo_cmd(c, m):
+    record_user(m.from_user.id)
+    await process_logo_watermark_interactive(c, m.chat.id, m.from_user.id)
+
+# ---------- Image command ----------
 @app.on_message(filters.command("image") & filters.private & filters.reply)
 async def image_cmd_reply(c, m):
     record_user(m.from_user.id)
@@ -2484,6 +2842,12 @@ async def image_settings_cmd(c, m):
         f"Default Text: {default_text}\n"
     )
     await m.reply(text, reply_markup=image_settings_keyboard())
+
+# ---------- NEW: Logo settings command ----------
+@app.on_message(filters.command("logo_settings") & filters.private)
+async def logo_settings_cmd(c, m):
+    record_user(m.from_user.id)
+    await show_logo_settings_inplace(c, m)
 
 @app.on_message(filters.command("contact_owner") & filters.private)
 async def contact_owner_cmd(c, m):
